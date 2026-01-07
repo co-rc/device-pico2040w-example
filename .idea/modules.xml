@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/BlasterRC.iml" filepath="$PROJECT_DIR$/.idea/BlasterRC.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/device-pico2040w-example.iml" filepath="$PROJECT_DIR$/.idea/device-pico2040w-example.iml" />
     </modules>
   </component>
 </project>

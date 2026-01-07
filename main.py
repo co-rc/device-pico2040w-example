@@ -9,6 +9,10 @@ CORC_DEVICE_NAME = "CORC"
 
 CORC_SERVICE_UUID = bluetooth.UUID("B13A1000-9F2A-4F3B-9C8E-A7D4E3C8B125")
 CORC_RX_CHAR_UUID = bluetooth.UUID("B13A1001-9F2A-4F3B-9C8E-A7D4E3C8B125")
+CORC_TX_CHAR_UUID = bluetooth.UUID("B13A1002-9F2A-4F3B-9C8E-A7D4E3C8B125")
+
+# Protocol constants
+PROTOCOL_BYTE_ORDER = "little"  # Little endian as per guidelines
 
 # --- BLE IRQ event codes ---
 _IRQ_CENTRAL_CONNECT = const(1)
@@ -20,7 +24,7 @@ _IRQ_ENCRYPTION_UPDATE = const(28)
 
 # Characteristic flags
 _FLAG_WRITE = const(0x0008)
-_FLAG_WRITE_NO_RESP = const(0x0004)
+_FLAG_NOTIFY = const(0x0010)
 
 # Advertising constants
 _ADV_TYPE_FLAGS = const(0x01)
@@ -101,12 +105,16 @@ class CorcBlePeripheral:
     CORC BLE peripheral
 
     - Advertises CORC service.
-    - Has RX characteristic (Android -> CORC), writes są ignorowane.
+    - Has RX characteristic (Android -> CORC), writes are ignored.
     - map CONNECTIONS: conn_handle -> BleConnection.
     """
 
     def __init__(self, name=CORC_DEVICE_NAME, preferred_mtu=247):
         self._name = name
+
+        # Command queue for RX processing (to keep IRQ fast)
+        self._cmd_queue = []
+        self._cmd_event = asyncio.ThreadSafeFlag()
 
         # BLE core
         self._ble = bluetooth.BLE()
@@ -116,20 +124,26 @@ class CorcBlePeripheral:
 
         self._ble.irq(self._irq)
 
-        # RX characteristic: Android -> CORC (ignore commands for now)
+        # RX characteristic: Android -> CORC
         self._rx_char = (
             CORC_RX_CHAR_UUID,
-            _FLAG_WRITE | _FLAG_WRITE_NO_RESP,
+            _FLAG_WRITE,
+        )
+
+        # TX characteristic: CORC -> Android (Notifications)
+        self._tx_char = (
+            CORC_TX_CHAR_UUID,
+            _FLAG_NOTIFY,
         )
 
         # Single CORC service
         self._service = (
             CORC_SERVICE_UUID,
-            (self._rx_char,),
+            (self._rx_char, self._tx_char),
         )
 
-        # Register GATT service and get the RX handle
-        ((self._rx_handle,),) = self._ble.gatts_register_services((self._service,))
+        # Register GATT service and get handles
+        ((self._rx_handle, self._tx_handle),) = self._ble.gatts_register_services((self._service,))
 
         # Advertising payloads
         self._adv_payload = self._build_adv_name_payload(self._name)
@@ -164,33 +178,27 @@ class CorcBlePeripheral:
     def _irq(self, event, data):
         if event == _IRQ_CENTRAL_CONNECT:
             conn_handle, addr_type, addr = data
-            print("CORC BLE: CONNECT  handle =", conn_handle, "addr_type =", addr_type)
             self._add_connection(conn_handle, addr_type, addr)
 
         elif event == _IRQ_CENTRAL_DISCONNECT:
             conn_handle, addr_type, addr = data
-            print("CORC BLE: DISCONNECT handle =", conn_handle)
             self._remove_connection(conn_handle)
             self._advertise()
 
         elif event == _IRQ_GATTS_WRITE:
             conn_handle, value_handle = data
             if value_handle == self._rx_handle:
-                # RX WRITE from Android – (just log)
-                conn = self._get_connection(conn_handle)
-                if conn is not None:
-                    print("CORC BLE: RX write ignored from", conn.short_addr(), "handle", conn_handle)
-                else:
-                    print("CORC BLE: RX write ignored from unknown handle", conn_handle)
+                # Read the written value
+                value = self._ble.gatts_read(self._rx_handle)
+                # Offload to async layer
+                self._cmd_queue.append((conn_handle, value))
+                self._cmd_event.set()
 
         elif event == _IRQ_MTU_EXCHANGED:
             conn_handle, mtu = data
             conn = self._get_connection(conn_handle)
             if conn is not None:
                 conn.update_mtu(mtu)
-                print("CORC BLE: MTU_EXCHANGED handle =", conn_handle, "mtu =", mtu, "addr =", conn.short_addr())
-            else:
-                print("CORC BLE: MTU_EXCHANGED for unknown handle", conn_handle, "mtu =", mtu)
 
         elif event == _IRQ_CONNECTION_UPDATE:
             conn_handle, conn_interval, conn_latency, supervision_timeout, status = data
@@ -200,26 +208,12 @@ class CorcBlePeripheral:
                                               conn_latency,
                                               supervision_timeout,
                                               status)
-                print("CORC BLE: CONN_UPDATE handle =", conn_handle,
-                      "interval =", conn_interval,
-                      "latency =", conn_latency,
-                      "timeout =", supervision_timeout,
-                      "status =", status)
-            else:
-                print("CORC BLE: CONN_UPDATE for unknown handle", conn_handle)
 
         elif event == _IRQ_ENCRYPTION_UPDATE:
             conn_handle, encrypted, authenticated, bonded, key_size = data
             conn = self._get_connection(conn_handle)
             if conn is not None:
                 conn.update_security(encrypted, authenticated, bonded, key_size)
-                print("CORC BLE: ENC_UPDATE handle =", conn_handle,
-                      "enc =", encrypted,
-                      "auth =", authenticated,
-                      "bonded =", bonded,
-                      "key_size =", key_size)
-            else:
-                print("CORC BLE: ENC_UPDATE for unknown handle", conn_handle)
 
         else:
             print("CORC BLE: unknown IRQ event ", event)
@@ -229,8 +223,23 @@ class CorcBlePeripheral:
     # -------------------------------------------------------------------------
     async def run(self):
         print("CORC BLE: Async loop started")
+        # Start the command processor task
+        asyncio.create_task(self._process_commands())
         while True:
             await asyncio.sleep(1)
+
+    async def _process_commands(self):
+        """
+        Drains the command queue and processes RX data.
+        """
+        while True:
+            await self._cmd_event.wait()
+            while self._cmd_queue:
+                conn_handle, value = self._cmd_queue.pop(0)
+                conn = self._get_connection(conn_handle)
+                addr = conn.short_addr() if conn else "unknown"
+                print("CORC BLE: RX command from {}: {!r}".format(addr, value))
+                # TODO: Implement protocol parsing and IR transmission here
 
     # -------------------------------------------------------------------------
     # Advertising helpers
@@ -285,3 +294,4 @@ async def main():
 
 
 asyncio.run(main())
+
