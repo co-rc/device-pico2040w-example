@@ -2,7 +2,7 @@ import logging
 
 from debug.time_utils import format_current_stamp
 
-_bp_logger = logging.getLogger(" BP")
+_bp_logger = logging.getLogger("<->")
 
 DBG = {}
 _TAG_SEQ = {}
@@ -12,6 +12,7 @@ _BP_COMMANDS = [
     ("l", "locals", "print locals() (if provided)"),
     ("g", "globals", "print globals() (if provided)"),
     ("p", "DBG", "print DBG snapshot"),
+    ("m", "meminfo", "print memory info"),
     ("h", "help", "help"),
 ]
 
@@ -82,6 +83,65 @@ def _print_map_summary(title, mapping, limit=60):
             print(f"  {key} <unprintable>")
 
 
+def _format_bytes(value):
+    s = str(value)
+    result = []
+    while s:
+        part = s[-3:]
+        if len(part) < 3:
+            part = " " * (3 - len(part)) + part
+        result.append(part)
+        s = s[:-3]
+    return ".".join(reversed(result)) + " bytes"
+
+
+# noinspection PyBroadException
+def _print_memory_info():
+    import gc
+
+    try:
+        gc.collect()
+        if getattr(gc, "mem_free", None) and getattr(gc, "mem_alloc", None):
+            mem_free = gc.mem_free()
+            mem_alloc = gc.mem_alloc()
+            mem_total = mem_free + mem_alloc
+
+            print(f"  Mem free:\t{_format_bytes(mem_free)}, {(mem_free * 100) // mem_total}%")
+            print(f"  Mem alloc:\t{_format_bytes(mem_alloc)}")
+            print(f"  Mem total:\t{_format_bytes(mem_total)}")
+            print()
+    except Exception:
+        pass
+
+    try:
+        import os
+        if getattr(os, "statvfs", None):
+            os.statvfs("/")
+            stats = os.statvfs("/")
+            block_size = stats[0]
+            fs_free = block_size * stats[3]
+            fs_total = block_size * stats[2]
+            fs_allocated = fs_total - fs_free
+
+            print(f"  FS free:\t{_format_bytes(fs_free)}, {(fs_free * 100) // fs_total}%")
+            print(f"  FS allocated:\t{_format_bytes(fs_allocated)}")
+            print(f"  FS total:\t{_format_bytes(fs_total)}")
+            print()
+    except Exception:
+        pass
+
+    try:
+        import micropython
+        if getattr(micropython, "mem_info", None):
+            micropython.mem_info()
+            print()
+        if getattr(micropython, "qstr_info", None):
+            micropython.qstr_info()
+            print()
+    except Exception:
+        pass
+
+
 # noinspection PyArgumentList
 def bp(tag, *, predicate=lambda: True, predicate_arg=None, with_log=False, locals_map=None, globals_map=None, **kw):
     sequence = _next_seq(tag)
@@ -100,7 +160,7 @@ def bp(tag, *, predicate=lambda: True, predicate_arg=None, with_log=False, local
         kw["predicate_error"] = repr(exc)
 
     if with_log:
-        _bp_logger.info(f"bp: {tag}#{sequence} @{format_current_stamp()}")
+        _bp_logger.info(f"inspect point: {tag} #{sequence}")
 
     if not should_break:
         return
@@ -112,7 +172,7 @@ def bp(tag, *, predicate=lambda: True, predicate_arg=None, with_log=False, local
     commands = _BP_COMMANDS
 
     prompt_parts = [f"{cmd}={short}" if short else cmd for cmd, short, desc in commands]
-    prompt = f"bp: {tag}#{sequence} @{format_current_stamp()}> [{', '.join(prompt_parts)}] "
+    prompt = f"inspect point: {tag} #{sequence} @{format_current_stamp()}> [{', '.join(prompt_parts)}] "
 
     while True:
         command = input(prompt).strip()[:1].lower()
@@ -130,6 +190,10 @@ def bp(tag, *, predicate=lambda: True, predicate_arg=None, with_log=False, local
 
         if command == "p":
             _print_map_summary("DBG:", DBG)
+            continue
+
+        if command == "m":
+            _print_memory_info()
             continue
 
         if command == "h":
