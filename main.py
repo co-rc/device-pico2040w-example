@@ -15,7 +15,7 @@ CORC_TX_CHAR_UUID = bluetooth.UUID("B13A1002-9F2A-4F3B-9C8E-A7D4E3C8B125")
 
 # Protocol constants
 PROTOCOL_BYTE_ORDER = "little"  # Little endian as per guidelines
-CORC_PROTOCOL_MAGIC = 0xC07C
+CORC_PROTOCOL_MAGIC = 0x2CC0
 
 # Result Codes (matching Android BleResult.java)
 RES_OK = 0x00
