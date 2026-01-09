@@ -1,20 +1,31 @@
-import logging
+from collections import OrderedDict
 
+import logging
 from debug.time_utils import format_current_stamp
 
-_bp_logger = logging.getLogger("<->")
+_bp_logger = logging.getLogger("<=>")
 
 DBG = {}
 _TAG_SEQ = {}
 
-_BP_COMMANDS = [
-    ("Enter", "continue", "continue"),
-    ("l", "locals", "print locals() (if provided)"),
-    ("g", "globals", "print globals() (if provided)"),
-    ("p", "DBG", "print DBG snapshot"),
-    ("m", "meminfo", "print memory info"),
-    ("h", "help", "help"),
-]
+_BP_COMMANDS = OrderedDict((
+    ("", ("continue", "continue", None)),
+    ("l", ("locals", "print locals() (if provided)", lambda short, ctx: _print_map_summary(short + ":", ctx[short]))),
+    ("g", ("globals", "print globals() (if provided)", lambda short, ctx: _print_map_summary(short + ":", ctx[short]))),
+    ("p", ("DBG", "print DBG snapshot", lambda short, ctx: _print_map_summary(short + ":", ctx[short]))),
+    ("m", ("meminfo", "print memory info", lambda _short, _ctx: _print_memory_info())),
+    ("s", ("strings", "qstr_info", lambda _short, _ctx: _print_qstr_info())),
+    ("x", ("gc", "perform gc", lambda _short, _ctx: _perform_gc())),
+    ("h", ("help", "help", lambda _short, _ctx: print(_BP_HELP_TEXT))),
+))
+
+_BP_PROMPT_KEYS = ", ".join(
+    f"{('enter' if cmd == '' else cmd)}={short}"
+    for cmd, (short, _desc, _action) in _BP_COMMANDS.items())
+
+_BP_HELP_TEXT = "commands:\n" + "\n".join(
+    f"  {('enter' if cmd == '' else cmd):10} {desc}"
+    for cmd, (_short, desc, _action) in _BP_COMMANDS.items())
 
 
 def _next_seq(tag):
@@ -96,50 +107,67 @@ def _format_bytes(value):
 
 
 # noinspection PyBroadException
-def _print_memory_info():
+def _print_mem_status(title=None):
     import gc
+    if getattr(gc, "mem_free", None) and getattr(gc, "mem_alloc", None):
+        if title:
+            print(title)
+        mem_free = gc.mem_free()
+        mem_alloc = gc.mem_alloc()
+        mem_total = mem_free + mem_alloc
+        print(f"  Mem free:\t{_format_bytes(mem_free)}, {(mem_free * 100) // mem_total}%")
+        print(f"  Mem alloc:\t{_format_bytes(mem_alloc)}")
+        print(f"  Mem total:\t{_format_bytes(mem_total)}")
 
-    try:
-        gc.collect()
-        if getattr(gc, "mem_free", None) and getattr(gc, "mem_alloc", None):
-            mem_free = gc.mem_free()
-            mem_alloc = gc.mem_alloc()
-            mem_total = mem_free + mem_alloc
 
-            print(f"  Mem free:\t{_format_bytes(mem_free)}, {(mem_free * 100) // mem_total}%")
-            print(f"  Mem alloc:\t{_format_bytes(mem_alloc)}")
-            print(f"  Mem total:\t{_format_bytes(mem_total)}")
-            print()
-    except Exception:
-        pass
+def _print_deep_mem_info(title=None):
+    import micropython
+    if getattr(micropython, "mem_info", None) and getattr(micropython, "qstr_info", None):
+        if title:
+            print(title)
+        micropython.mem_info()
+        print()
+        micropython.qstr_info()
 
-    try:
-        import os
-        if getattr(os, "statvfs", None):
-            os.statvfs("/")
-            stats = os.statvfs("/")
-            block_size = stats[0]
-            fs_free = block_size * stats[3]
-            fs_total = block_size * stats[2]
-            fs_allocated = fs_total - fs_free
 
-            print(f"  FS free:\t{_format_bytes(fs_free)}, {(fs_free * 100) // fs_total}%")
-            print(f"  FS allocated:\t{_format_bytes(fs_allocated)}")
-            print(f"  FS total:\t{_format_bytes(fs_total)}")
-            print()
-    except Exception:
-        pass
+def _print_fs_status(title=None):
+    import os
+    if getattr(os, "statvfs", None):
+        if title:
+            print(title)
+        os.statvfs("/")
+        stats = os.statvfs("/")
+        block_size = stats[0]
+        fs_free = block_size * stats[3]
+        fs_total = block_size * stats[2]
+        fs_allocated = fs_total - fs_free
+        print(f"  FS free:\t{_format_bytes(fs_free)}, {(fs_free * 100) // fs_total}%")
+        print(f"  FS allocated:\t{_format_bytes(fs_allocated)}")
+        print(f"  FS total:\t{_format_bytes(fs_total)}")
 
-    try:
-        import micropython
-        if getattr(micropython, "mem_info", None):
-            micropython.mem_info()
-            print()
-        if getattr(micropython, "qstr_info", None):
-            micropython.qstr_info()
-            print()
-    except Exception:
-        pass
+
+def _print_qstr_info(title=None):
+    import micropython
+    if getattr(micropython, "qstr_info", None):
+        if title:
+            print(title)
+        micropython.qstr_info(True)
+
+
+def _print_memory_info():
+    _print_mem_status()
+    print()
+    _print_fs_status()
+    print()
+    _print_deep_mem_info()
+    print()
+
+
+def _perform_gc():
+    import gc
+    _print_mem_status("before gc")
+    gc.collect()
+    _print_mem_status("after gc")
 
 
 # noinspection PyArgumentList
@@ -169,37 +197,20 @@ def bp(tag, *, predicate=lambda: True, predicate_arg=None, with_log=False, local
     DBG.update(kw)
     _print_map_summary("DBG:", DBG)
 
-    commands = _BP_COMMANDS
-
-    prompt_parts = [f"{cmd}={short}" if short else cmd for cmd, short, desc in commands]
-    prompt = f"inspect point: {tag} #{sequence} @{format_current_stamp()}> [{', '.join(prompt_parts)}] "
+    ctx = {"locals": locals_map,
+           "globals": globals_map,
+           "DBG": DBG}
+    prompt = f"inspect point: {tag} #{sequence} @{format_current_stamp()}> [{_BP_PROMPT_KEYS}] "
 
     while True:
         command = input(prompt).strip()[:1].lower()
-
         if not command:
             return
 
-        if command == "l":
-            _print_map_summary("locals:", locals_map)
+        entry = _BP_COMMANDS.get(command)
+        if not entry:
             continue
 
-        if command == "g":
-            _print_map_summary("globals:", globals_map)
-            continue
-
-        if command == "p":
-            _print_map_summary("DBG:", DBG)
-            continue
-
-        if command == "m":
-            _print_memory_info()
-            continue
-
-        if command == "h":
-            print("commands:")
-            for cmd, short, desc in commands:
-                print(f"  {cmd.split('/')[0]:10} {desc}")
-            continue
-
-        print("unknown command:", command)
+        short, _desc, action = entry
+        if action:
+            action(short, ctx)
