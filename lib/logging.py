@@ -1,7 +1,8 @@
-from micropython import const
-import io
+# Derived from micropython-lib logging 0.7.2
 import sys
 import time
+
+from micropython import const
 
 CRITICAL = const(50)
 ERROR = const(40)
@@ -28,14 +29,20 @@ _default_datefmt = "%Y-%m-%d %H:%M:%S"
 
 
 class LogRecord:
+    def __init__(self):
+        self.name = None
+        self.levelno = None
+        self.levelname = None
+        self.message = None
+        self.ct = time.time()
+        self.msecs = int((self.ct - int(self.ct)) * 1000)
+        self.asctime = None
+
     def set(self, name, level, message):
         self.name = name
         self.levelno = level
         self.levelname = _level_dict[level]
         self.message = message
-        self.ct = time.time()
-        self.msecs = int((self.ct - int(self.ct)) * 1000)
-        self.asctime = None
 
 
 class Handler:
@@ -85,17 +92,7 @@ class Formatter:
         self.fmt = _default_fmt if fmt is None else fmt
         self.datefmt = _default_datefmt if datefmt is None else datefmt
 
-    def usesTime(self):
-        return "asctime" in self.fmt
-
-    def formatTime(self, datefmt, record):
-        if hasattr(time, "strftime"):
-            return time.strftime(datefmt, time.localtime(record.ct))
-        return None
-
     def format(self, record):
-        if self.usesTime():
-            record.asctime = self.formatTime(self.datefmt, record)
         return self.fmt % {
             "name": record.name,
             "message": record.message,
@@ -110,7 +107,6 @@ class Logger:
         self.name = name
         self.level = level
         self.handlers = []
-        self.record = LogRecord()
 
     def setLevel(self, level):
         self.level = level
@@ -124,15 +120,20 @@ class Logger:
     def log(self, level, msg, *args):
         if self.isEnabledFor(level):
             if args:
-                if isinstance(args[0], dict):
-                    args = args[0]
-                msg = msg % args
-            self.record.set(self.name, level, msg)
+                if len(args) == 1 and isinstance(args[0], dict):
+                    msg = msg % args[0]
+                elif isinstance(msg, str) and "%" in msg:
+                    msg = msg % args
+                else:
+                    msg = str(msg) + " " + " ".join(map(str, args))
+
+            record = LogRecord()
+            record.set(self.name, level, msg)
             handlers = self.handlers
             if not handlers:
                 handlers = getLogger().handlers
             for h in handlers:
-                h.emit(self.record)
+                h.emit(record)
 
     def debug(self, msg, *args):
         self.log(DEBUG, msg, *args)
@@ -151,18 +152,24 @@ class Logger:
 
     def exception(self, msg, *args, exc_info=True):
         self.log(ERROR, msg, *args)
-        tb = None
-        if isinstance(exc_info, BaseException):
-            tb = exc_info
-        elif hasattr(sys, "exc_info"):
-            tb = sys.exc_info()[1]
-        if tb:
-            buf = io.StringIO()
-            sys.print_exception(tb, buf)
-            self.log(ERROR, buf.getvalue())
+        if exc_info:
+            import sys
+            if isinstance(exc_info, BaseException):
+                e = exc_info
+            else:
+                e = sys.exc_info()[1]
+            if hasattr(sys, "print_exception"):
+                sys.print_exception(e)
+            else:
+                import traceback
+                traceback.print_exception(type(e), e, e.__traceback__)
 
     def addHandler(self, handler):
         self.handlers.append(handler)
+
+    def removeHandler(self, handler):
+        if handler in self.handlers:
+            self.handlers.remove(handler)
 
     def hasHandlers(self):
         return len(self.handlers) > 0
@@ -207,10 +214,10 @@ def exception(msg, *args, exc_info=True):
 
 
 def shutdown():
-    for k, logger in _loggers.items():
+    for logger in _loggers.values():
         for h in logger.handlers:
             h.close()
-        _loggers.pop(logger, None)
+    _loggers.clear()
 
 
 def addLevelName(level, name):
@@ -218,14 +225,14 @@ def addLevelName(level, name):
 
 
 def basicConfig(
-    filename=None,
-    filemode="a",
-    format=None,
-    datefmt=None,
-    level=WARNING,
-    stream=None,
-    encoding="UTF-8",
-    force=False,
+        filename=None,
+        filemode="a",
+        format=None,
+        datefmt=None,
+        level=WARNING,
+        stream=None,
+        encoding="UTF-8",
+        force=False,
 ):
     if "root" not in _loggers:
         _loggers["root"] = Logger("root")
@@ -252,5 +259,4 @@ def basicConfig(
 if hasattr(sys, "atexit"):
     sys.atexit(shutdown)
 
-
-__version__ = '0.6.2'
+__version__ = '0.7.2'

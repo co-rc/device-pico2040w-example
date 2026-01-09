@@ -1,6 +1,7 @@
 import bluetooth
 from micropython import const
 import uasyncio as asyncio
+from debug.debug_logging import BLE
 
 # ---------------------------------------------------------------------------
 # CORC constants
@@ -158,16 +159,16 @@ class CorcBlePeripheral:
     def _add_connection(self, conn_handle, addr_type, addr):
         if conn_handle in CONNECTIONS:
             removed = CONNECTIONS.pop(conn_handle)
-            print("CORC BLE: removing existing BleConnection for handle", conn_handle, removed)
+            BLE.info("removing existing BleConnection for handle", conn_handle, removed)
 
         connection = BleConnection(conn_handle, addr_type, addr, initial_mtu=23)
         CONNECTIONS[conn_handle] = connection
-        print("CORC BLE: new BleConnection:", connection)
+        BLE.info("new BleConnection: ", connection)
 
     def _remove_connection(self, conn_handle):
         connection = CONNECTIONS.pop(conn_handle, None)
         if connection is not None:
-            print("CORC BLE: BleConnection removed:", connection)
+            BLE.info("BleConnection removed:", connection)
 
     def _get_connection(self, conn_handle):
         return CONNECTIONS.get(conn_handle, None)
@@ -216,13 +217,13 @@ class CorcBlePeripheral:
                 conn.update_security(encrypted, authenticated, bonded, key_size)
 
         else:
-            print("CORC BLE: unknown IRQ event ", event)
+            BLE.info("unknown IRQ event ", event)
 
     # -------------------------------------------------------------------------
     # PUBLIC API / MAIN LOOP
     # -------------------------------------------------------------------------
     async def run(self):
-        print("CORC BLE: Async loop started")
+        BLE.info("Async loop started")
         # Start the command processor task
         asyncio.create_task(self._process_commands())
         while True:
@@ -238,7 +239,7 @@ class CorcBlePeripheral:
                 conn_handle, value = self._cmd_queue.pop(0)
                 conn = self._get_connection(conn_handle)
                 addr = conn.short_addr() if conn else "unknown"
-                print("CORC BLE: RX command from {}: {!r}".format(addr, value))
+                BLE.info("RX command from {}: {!r}".format(addr, value))
                 # TODO: Implement protocol parsing and IR transmission here
 
     # -------------------------------------------------------------------------
@@ -278,7 +279,7 @@ class CorcBlePeripheral:
         return bytes(payload)
 
     def _advertise(self, interval_us=500_000):
-        print("CORC BLE: Advertising as '{}'".format(self._name))
+        BLE.info("Advertising as '{}'".format(self._name))
         self._ble.gap_advertise(
             interval_us,
             adv_data=self._adv_payload,
